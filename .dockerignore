@@ -1,0 +1,8 @@
+bin/
+data/
+*.log
+.git/
+.github/
+**/__pycache__/
+*.md
+ml/.venv/

@@ -1,0 +1,29 @@
+# Build output
+/bin/
+*.exe
+
+# Runtime data (audit trail, signing keys) — never commit secrets/logs
+/data/
+*.log
+
+# Audit signing keys, if placed elsewhere
+key.hex
+
+# Go
+coverage.out
+*.test
+
+# Python
+__pycache__/
+*.pyc
+ml/.venv/
+.venv/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets
+.env
+

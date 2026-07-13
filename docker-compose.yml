@@ -1,0 +1,83 @@
+# Argus market-surveillance stack.
+#
+#   Self-contained demo (synthetic manipulation tape, no external data):
+#     docker compose --profile demo up --build
+#
+#   Live mode (real Binance feed; requires outbound internet):
+#     docker compose --profile live up --build
+#
+# Then open the dashboard at http://localhost:8080.
+# Core services (nats, detector, api, ml) run in both modes; the feed source
+# (replay vs ingestor) is selected by the profile.
+
+name: argus
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"   # client
+      - "8222:8222"   # monitoring
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  detector:
+    build: .
+    command: ["detector", "-nats", "nats://nats:4222", "-audit-dir", "/data/audit", "-metrics-addr", ":2113"]
+    environment:
+      NATS_URL: nats://nats:4222
+    volumes:
+      - audit:/data
+    ports:
+      - "2113:2113"   # /metrics
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: ["api", "-nats", "nats://nats:4222", "-audit-dir", "/data/audit", "-addr", ":8080"]
+    volumes:
+      - audit:/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      nats:
+        condition: service_healthy
+      detector:
+        condition: service_started
+
+  ml:
+    build: ./ml
+    environment:
+      NATS_URL: nats://nats:4222
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  # --- feed sources (pick one via --profile) ---
+
+  replay:
+    build: .
+    command: ["replay", "-nats", "nats://nats:4222", "-symbol", "BTCUSDT", "-speed", "3"]
+    profiles: ["demo"]
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  ingestor:
+    build: .
+    command: ["ingestor", "-symbols", "BTCUSDT,ETHUSDT", "-nats", "nats://nats:4222", "-metrics-addr", ":2112"]
+    profiles: ["live"]
+    ports:
+      - "2112:2112"   # /metrics
+    depends_on:
+      nats:
+        condition: service_healthy
+
+volumes:
+  audit:
