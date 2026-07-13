@@ -63,7 +63,7 @@ services:
 
   replay:
     build: .
-    command: ["replay", "-nats", "nats://nats:4222", "-symbol", "BTCUSDT", "-speed", "3"]
+    command: ["replay", "-nats", "nats://nats:4222", "-symbol", "BTCUSDT", "-speed", "2"]
     profiles: ["demo"]
     depends_on:
       nats:

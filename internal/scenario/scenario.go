@@ -121,9 +121,12 @@ func Manipulations(symbol string) []Step {
 	b.trade("30022.00", "3", events.Sell) // retrace past 50%
 
 	// 6. Quote stuffing: 250 book updates within a second, no executions.
-	// A long quiet gap ensures the preceding trades have aged out of the
-	// stuffing/wash windows even at elevated playback speeds.
-	b.at(3500 * time.Millisecond)
+	// The quiet gaps before this phase and the wash phase must exceed the
+	// largest detector window (2s wash) times the playback speed, with margin
+	// for inter-process delivery jitter — otherwise the preceding momentum
+	// trades linger in those windows and suppress the detectors. Sized to stay
+	// correct up to ~3x speed over NATS.
+	b.at(4500 * time.Millisecond)
 	stuff := 2900000
 	for d := 0; d < 5; d++ {
 		if d > 0 {
@@ -139,7 +142,7 @@ func Manipulations(symbol string) []Step {
 
 	// 7. Wash-trade footprint: offsetting prints in a razor-thin band. The gap
 	// clears the wide-band momentum prints from the wash detector's window.
-	b.at(6000 * time.Millisecond)
+	b.at(8000 * time.Millisecond)
 	sides := []events.Side{events.Buy, events.Sell}
 	for i := 0; i < 8; i++ {
 		if i > 0 {
