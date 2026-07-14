@@ -21,8 +21,12 @@ test-race: ## Run tests with the race detector
 	go test -race ./...
 
 .PHONY: test-live
-test-live: ## Run the live Binance smoke test (needs internet)
-	ARGUS_LIVE=1 go test ./internal/exchange/binance/ -run TestLiveBinanceSmoke -v
+test-live: ## Run the live exchange smoke tests, Binance + OKX (needs internet)
+	ARGUS_LIVE=1 go test ./internal/exchange/... -run 'TestLive.*Smoke' -v
+
+.PHONY: bench
+bench: ## Benchmark detection-engine throughput
+	go test ./internal/detect/ -bench . -benchtime 2s -run XXX
 
 .PHONY: test-ml
 test-ml: ## Run the Python ML scorer offline test
@@ -59,6 +63,10 @@ up-live: ## docker compose: live Binance feed
 .PHONY: down
 down: ## Tear down the docker stack and volumes
 	docker compose --profile demo --profile live down -v
+
+.PHONY: azure-deploy
+azure-deploy: ## Deploy the full stack to Azure Container Apps (RG=<group> [LOC=eastus] [FEED=demo])
+	./deploy/azure/deploy.sh $(RG) $(or $(LOC),eastus) $(or $(FEED),demo)
 
 .PHONY: clean
 clean: ## Remove build output and local data

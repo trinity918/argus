@@ -71,10 +71,20 @@ services:
 
   ingestor:
     build: .
-    command: ["ingestor", "-symbols", "BTCUSDT,ETHUSDT", "-nats", "nats://nats:4222", "-metrics-addr", ":2112"]
+    command: ["ingestor", "-exchange", "binance", "-symbols", "BTCUSDT,ETHUSDT", "-nats", "nats://nats:4222", "-metrics-addr", ":2112"]
     profiles: ["live"]
     ports:
       - "2112:2112"   # /metrics
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  ingestor-okx:
+    build: .
+    command: ["ingestor", "-exchange", "okx", "-symbols", "BTC-USDT,ETH-USDT", "-nats", "nats://nats:4222", "-metrics-addr", ":2114"]
+    profiles: ["live"]
+    ports:
+      - "2114:2114"   # /metrics
     depends_on:
       nats:
         condition: service_healthy

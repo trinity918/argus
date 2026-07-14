@@ -46,7 +46,15 @@ func envSymbol(env events.Envelope) string {
 
 // SubscribeMarketData decodes market-data envelopes off the bus into fn.
 func SubscribeMarketData(bus transport.Bus, fn func(events.Envelope)) (transport.Subscription, error) {
-	return bus.Subscribe(transport.MarketDataAll, func(_ string, data []byte) {
+	return SubscribeMarketDataFiltered(bus, transport.MarketDataAll, fn)
+}
+
+// SubscribeMarketDataFiltered subscribes to a subject pattern instead of all
+// symbols — the sharding seam: running N detectors each with a disjoint
+// pattern (md.BTCUSDT vs md.ETH*) partitions the symbol space horizontally
+// with no coordination, because detector state is strictly per-symbol.
+func SubscribeMarketDataFiltered(bus transport.Bus, pattern string, fn func(events.Envelope)) (transport.Subscription, error) {
+	return bus.Subscribe(pattern, func(_ string, data []byte) {
 		var env events.Envelope
 		if err := json.Unmarshal(data, &env); err != nil {
 			return
@@ -55,10 +63,27 @@ func SubscribeMarketData(bus transport.Bus, fn func(events.Envelope)) (transport
 	})
 }
 
+// DetectionOption customizes RunDetection.
+type DetectionOption func(*detectionOptions)
+
+type detectionOptions struct {
+	pattern string
+}
+
+// WithSubjectFilter restricts the detector to a market-data subject pattern
+// (NATS wildcards allowed), e.g. "md.BTCUSDT" or "md.*". Default: all symbols.
+func WithSubjectFilter(pattern string) DetectionOption {
+	return func(o *detectionOptions) { o.pattern = pattern }
+}
+
 // RunDetection wires the detection engine to a bus: it subscribes to market
 // data, appends every alert to the audit chain, and republishes alerts and
 // feature vectors. It blocks until ctx is cancelled. chain and m may be nil.
-func RunDetection(ctx context.Context, bus transport.Bus, cfg detect.Config, chain *audit.Chain, m *metrics.Metrics) error {
+func RunDetection(ctx context.Context, bus transport.Bus, cfg detect.Config, chain *audit.Chain, m *metrics.Metrics, opts ...DetectionOption) error {
+	o := detectionOptions{pattern: transport.MarketDataAll}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	emitAlert := func(a detect.Alert) {
 		b, err := json.Marshal(a)
 		if err != nil {
@@ -100,7 +125,7 @@ func RunDetection(ctx context.Context, bus transport.Bus, cfg detect.Config, cha
 	}
 
 	eng := detect.NewEngine(cfg, emitAlert, detect.WithFeatures(emitFeatures))
-	sub, err := SubscribeMarketData(bus, func(env events.Envelope) {
+	sub, err := SubscribeMarketDataFiltered(bus, o.pattern, func(env events.Envelope) {
 		start := time.Now()
 		eng.HandleEnvelope(env)
 		if m != nil {

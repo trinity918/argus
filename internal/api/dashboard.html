@@ -57,6 +57,16 @@
   .status.ok{color:var(--ok)} .status.bad{color:var(--critical)} .status.pending{color:var(--muted)}
   .empty{padding:26px;text-align:center;color:var(--muted);font-size:13px}
   .det{color:var(--accent2);font-weight:600}
+  .mkts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-bottom:18px}
+  .mkt{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 16px}
+  .mkt .sym{display:flex;justify-content:space-between;align-items:baseline}
+  .mkt .sym b{font-size:14px;letter-spacing:.04em}
+  .mkt .sym span{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .mkt .px{font-size:22px;font-weight:700;margin:4px 0 8px;font-variant-numeric:tabular-nums}
+  .mkt .micro{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;font-size:11px;color:var(--muted)}
+  .mkt .micro b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  .ofibar{height:4px;border-radius:2px;background:var(--line);margin-top:8px;position:relative;overflow:hidden}
+  .ofibar i{position:absolute;top:0;bottom:0;left:50%;background:var(--accent2);border-radius:2px;transition:.3s}
   footer{max-width:1200px;margin:0 auto;padding:14px 22px;color:var(--muted);font-size:11px;line-height:1.6}
 </style>
 </head>
@@ -77,6 +87,8 @@
     <div class="tile"><div class="k">Dashboard Clients</div><div class="v" id="mClients">0</div></div>
     <div class="tile"><div class="k">Audit Chain</div><div class="v"><span class="status pending" id="mAudit">unverified</span></div></div>
   </div>
+
+  <div class="mkts" id="mkts" style="display:none"></div>
 
   <div class="grid">
     <div class="panel">
@@ -152,7 +164,33 @@
         $('cpRoot').textContent=short(cp.merkle_root);
         $('cpSig').textContent=short(cp.signature);
       }
+      renderMarkets(s.markets||{});
     }catch(e){}
+  }
+
+  function renderMarkets(mkts){
+    const keys=Object.keys(mkts).sort();
+    const el=$('mkts');
+    if(keys.length===0){ el.style.display='none'; return; }
+    el.style.display='grid';
+    el.innerHTML=keys.map(k=>{
+      const m=mkts[k];
+      const px=m.last_price? m.last_price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
+      const ofi=(m.ofi||0);
+      const w=Math.min(50,Math.abs(ofi)*50);
+      const left=ofi>=0? '50%' : (50-w)+'%';
+      return '<div class="mkt">'+
+        '<div class="sym"><b>'+m.symbol+'</b><span>'+(m.exchange||'')+'</span></div>'+
+        '<div class="px">'+px+'</div>'+
+        '<div class="micro">'+
+          '<span>spread <b>'+(m.spread_bps||0).toFixed(2)+' bps</b></span>'+
+          '<span>trades/s <b>'+(m.trade_intensity||0).toFixed(1)+'</b></span>'+
+          '<span>OFI <b>'+ofi.toFixed(2)+'</b></span>'+
+          '<span>cancel <b>'+((m.cancel_ratio||0)*100).toFixed(0)+'%</b></span>'+
+        '</div>'+
+        '<div class="ofibar"><i style="left:'+left+';width:'+w+'%"></i></div>'+
+      '</div>';
+    }).join('');
   }
 
   async function verify(){

@@ -28,6 +28,12 @@ type Config struct {
 	// Layering: this many distinct same-side levels pulled within LayeringWindow.
 	LayeringLevels int
 	LayeringWindow time.Duration
+	// Cooldowns throttle alert emission per detector (pulls are still tracked
+	// internally). On fast live markets large add-then-pull sequences occur
+	// constantly — without a floor between alerts, the feed becomes a storm
+	// that drowns triage and bloats the audit chain.
+	SpoofCooldown    time.Duration
+	LayeringCooldown time.Duration
 
 	// --- Momentum ignition ---
 	// An ignition leg is a price move of at least IgniteBps with same-direction
@@ -75,6 +81,8 @@ func DefaultConfig() Config {
 		SpoofMaxDistBps:    25,
 		LayeringLevels:     3,
 		LayeringWindow:     4 * time.Second,
+		SpoofCooldown:      1 * time.Second,
+		LayeringCooldown:   5 * time.Second,
 
 		IgniteBps:     15,
 		IgniteVol:     fp.MustParse("5"),

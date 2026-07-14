@@ -1,6 +1,8 @@
-// Command ingestor is the standalone ingestion service: it connects to Binance,
-// normalizes the feed, and publishes market-data envelopes to NATS. In the
-// distributed topology it scales independently of detection.
+// Command ingestor is the standalone ingestion service: it connects to one
+// venue (Binance or OKX), normalizes the feed, and publishes market-data
+// envelopes to NATS. Multi-venue surveillance runs one ingestor per venue —
+// each scales, restarts, and backpressures independently, which is the whole
+// point of the distributed topology.
 package main
 
 import (
@@ -15,6 +17,7 @@ import (
 
 	"github.com/argus-mss/argus/internal/app"
 	"github.com/argus-mss/argus/internal/exchange/binance"
+	"github.com/argus-mss/argus/internal/exchange/okx"
 	"github.com/argus-mss/argus/internal/metrics"
 	"github.com/argus-mss/argus/internal/transport"
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,7 +25,8 @@ import (
 
 func main() {
 	var (
-		symbols     = flag.String("symbols", "BTCUSDT", "comma-separated symbols")
+		exchange    = flag.String("exchange", envOr("EXCHANGE", "binance"), "venue to ingest: binance | okx")
+		symbols     = flag.String("symbols", "", "comma-separated symbols (default BTCUSDT for binance, BTC-USDT for okx)")
 		natsURL     = flag.String("nats", envOr("NATS_URL", ""), "NATS URL (default nats://127.0.0.1:4222)")
 		metricsAddr = flag.String("metrics-addr", ":2112", "metrics listen address")
 	)
@@ -39,38 +43,63 @@ func main() {
 	}
 	defer bus.Close()
 
-	syms := splitSymbols(*symbols)
-	client := binance.New(binance.Config{Symbols: syms, Logger: log}, app.EnvelopePublisher{Bus: bus})
-
+	pub := app.EnvelopePublisher{Bus: bus}
 	m := metrics.New()
-	registerIngestStats(m.Registry(), client)
+
+	var run func(context.Context) error
+	var syms []string
+	switch *exchange {
+	case "binance":
+		syms = splitSymbols(*symbols, "BTCUSDT")
+		client := binance.New(binance.Config{Symbols: syms, Logger: log}, pub)
+		registerStats(m.Registry(), func() ingestStats {
+			s := client.Stats()
+			return ingestStats{s.MessagesReceived, s.MessagesDropped, s.Reconnects, s.Resyncs, s.TradesEmitted, s.DepthEmitted}
+		})
+		run = client.Run
+	case "okx":
+		syms = splitSymbols(*symbols, "BTC-USDT")
+		client := okx.New(okx.Config{Symbols: syms, Logger: log}, pub)
+		registerStats(m.Registry(), func() ingestStats {
+			s := client.Stats()
+			return ingestStats{s.MessagesReceived, s.MessagesDropped, s.Reconnects, s.Resyncs, s.TradesEmitted, s.DepthEmitted}
+		})
+		run = client.Run
+	default:
+		log.Error("unknown exchange", "exchange", *exchange)
+		os.Exit(2)
+	}
+
 	go serveMetrics(*metricsAddr, m, log)
 
-	log.Info("ingestor starting", "symbols", syms, "nats", *natsURL)
-	if err := client.Run(ctx); err != nil && ctx.Err() == nil {
+	log.Info("ingestor starting", "exchange", *exchange, "symbols", syms, "nats", *natsURL)
+	if err := run(ctx); err != nil && ctx.Err() == nil {
 		log.Error("ingestion stopped", "err", err)
 		os.Exit(1)
 	}
 }
 
-func registerIngestStats(reg *prometheus.Registry, c *binance.Client) {
+// ingestStats is the venue-agnostic slice of counters exported as metrics.
+type ingestStats struct {
+	received, dropped, reconnects, resyncs, trades, depth int64
+}
+
+func registerStats(reg *prometheus.Registry, get func() ingestStats) {
 	counters := []struct {
 		name, help string
-		get        func(binance.Stats) int64
+		pick       func(ingestStats) int64
 	}{
-		{"argus_ingest_messages_received_total", "WebSocket frames received.", func(s binance.Stats) int64 { return s.MessagesReceived }},
-		{"argus_ingest_messages_dropped_total", "Frames shed under backpressure.", func(s binance.Stats) int64 { return s.MessagesDropped }},
-		{"argus_ingest_reconnects_total", "WebSocket reconnects.", func(s binance.Stats) int64 { return s.Reconnects }},
-		{"argus_ingest_resyncs_total", "Order-book resyncs after sequence gaps.", func(s binance.Stats) int64 { return s.Resyncs }},
-		{"argus_ingest_trades_total", "Trade events published.", func(s binance.Stats) int64 { return s.TradesEmitted }},
-		{"argus_ingest_depth_total", "Depth diffs published.", func(s binance.Stats) int64 { return s.DepthEmitted }},
-		{"argus_ingest_snapshot_fetches_total", "REST snapshot fetches.", func(s binance.Stats) int64 { return s.SnapshotFetches }},
-		{"argus_ingest_snapshot_errors_total", "Failed snapshot fetches.", func(s binance.Stats) int64 { return s.SnapshotErrors }},
+		{"argus_ingest_messages_received_total", "WebSocket frames received.", func(s ingestStats) int64 { return s.received }},
+		{"argus_ingest_messages_dropped_total", "Frames shed under backpressure.", func(s ingestStats) int64 { return s.dropped }},
+		{"argus_ingest_reconnects_total", "WebSocket reconnects.", func(s ingestStats) int64 { return s.reconnects }},
+		{"argus_ingest_resyncs_total", "Order-book resyncs after sequence gaps.", func(s ingestStats) int64 { return s.resyncs }},
+		{"argus_ingest_trades_total", "Trade events published.", func(s ingestStats) int64 { return s.trades }},
+		{"argus_ingest_depth_total", "Depth diffs published.", func(s ingestStats) int64 { return s.depth }},
 	}
-	for _, c2 := range counters {
-		get := c2.get
-		reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{Name: c2.name, Help: c2.help},
-			func() float64 { return float64(get(c.Stats())) }))
+	for _, c := range counters {
+		pick := c.pick
+		reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{Name: c.name, Help: c.help},
+			func() float64 { return float64(pick(get())) }))
 	}
 }
 
@@ -83,7 +112,12 @@ func serveMetrics(addr string, m *metrics.Metrics, log *slog.Logger) {
 	}
 }
 
-func splitSymbols(s string) []string {
+// splitSymbols parses a comma list, upper-casing entries. OKX instIds keep
+// their dash (BTC-USDT); upper-casing is a no-op for well-formed input.
+func splitSymbols(s, def string) []string {
+	if strings.TrimSpace(s) == "" {
+		return []string{def}
+	}
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
@@ -92,7 +126,7 @@ func splitSymbols(s string) []string {
 		}
 	}
 	if len(out) == 0 {
-		out = []string{"BTCUSDT"}
+		out = []string{def}
 	}
 	return out
 }

@@ -1,0 +1,52 @@
+name: deploy-azure
+
+# Manual continuous deployment to Azure Container Apps.
+#
+# One-time setup (OIDC federated credentials — no long-lived secrets):
+#   1. az ad app create --display-name argus-deployer
+#   2. Create a federated credential for this repo's environment/branch.
+#   3. Grant the app Contributor on the target subscription or resource group.
+#   4. Add repo secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
+
+on:
+  workflow_dispatch:
+    inputs:
+      resource_group:
+        description: Target resource group
+        required: true
+        default: argus-rg
+      location:
+        description: Azure region
+        required: true
+        default: eastus
+      feed_mode:
+        description: demo (synthetic tape) or live (Binance + OKX)
+        required: true
+        default: demo
+        type: choice
+        options: [demo, live]
+
+permissions:
+  id-token: write # OIDC token for azure/login
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy
+        run: |
+          chmod +x deploy/azure/deploy.sh
+          IMAGE_TAG="${GITHUB_SHA::12}" deploy/azure/deploy.sh \
+            "${{ inputs.resource_group }}" \
+            "${{ inputs.location }}" \
+            "${{ inputs.feed_mode }}"

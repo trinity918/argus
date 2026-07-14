@@ -21,6 +21,7 @@ import (
 	"github.com/argus-mss/argus/internal/audit"
 	"github.com/argus-mss/argus/internal/detect"
 	"github.com/argus-mss/argus/internal/exchange/binance"
+	"github.com/argus-mss/argus/internal/exchange/okx"
 	"github.com/argus-mss/argus/internal/metrics"
 	"github.com/argus-mss/argus/internal/scenario"
 	"github.com/argus-mss/argus/internal/transport"
@@ -32,7 +33,8 @@ func main() {
 		symbols  = flag.String("symbols", "BTCUSDT", "comma-separated symbols")
 		auditDir = flag.String("audit-dir", "./data/audit", "audit trail directory")
 		cpEvery  = flag.Int("checkpoint-interval", 32, "entries per signed Merkle checkpoint")
-		live     = flag.Bool("live", false, "ingest live Binance data instead of the synthetic scenario")
+		live     = flag.Bool("live", false, "ingest live exchange data instead of the synthetic scenario")
+		exchange = flag.String("exchange", "binance", "live venue: binance | okx (okx symbols look like BTC-USDT)")
 		speed    = flag.Float64("speed", 1.0, "scenario playback speed multiplier")
 	)
 	flag.Parse()
@@ -82,9 +84,16 @@ func main() {
 	// Ingestion: live or scenario.
 	go func() {
 		if *live {
-			log.Info("ingesting live Binance data", "symbols", syms)
-			client := binance.New(binance.Config{Symbols: syms, Logger: log}, app.EnvelopePublisher{Bus: bus})
-			if err := client.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Info("ingesting live data", "exchange", *exchange, "symbols", syms)
+			pub := app.EnvelopePublisher{Bus: bus}
+			var run func(context.Context) error
+			switch *exchange {
+			case "okx":
+				run = okx.New(okx.Config{Symbols: syms, Logger: log}, pub).Run
+			default:
+				run = binance.New(binance.Config{Symbols: syms, Logger: log}, pub).Run
+			}
+			if err := run(ctx); err != nil && ctx.Err() == nil {
 				log.Error("ingestion", "err", err)
 			}
 			return

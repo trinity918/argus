@@ -26,6 +26,7 @@ func main() {
 		auditDir    = flag.String("audit-dir", envOr("AUDIT_DIR", "./data/audit"), "audit trail directory")
 		cpEvery     = flag.Int("checkpoint-interval", 32, "entries per signed Merkle checkpoint")
 		metricsAddr = flag.String("metrics-addr", ":2113", "metrics listen address")
+		subjects    = flag.String("subjects", envOr("SUBJECTS", "md.*"), "market-data subject filter for symbol sharding (e.g. md.BTCUSDT)")
 	)
 	flag.Parse()
 
@@ -56,8 +57,8 @@ func main() {
 	m := metrics.New()
 	go serveMetrics(*metricsAddr, m, log)
 
-	log.Info("detector starting", "nats", *natsURL, "audit_dir", *auditDir, "signer", signer.PublicKeyHex())
-	if err := app.RunDetection(ctx, bus, detect.DefaultConfig(), chain, m); err != nil && ctx.Err() == nil {
+	log.Info("detector starting", "nats", *natsURL, "audit_dir", *auditDir, "subjects", *subjects, "signer", signer.PublicKeyHex())
+	if err := app.RunDetection(ctx, bus, detect.DefaultConfig(), chain, m, app.WithSubjectFilter(*subjects)); err != nil && ctx.Err() == nil {
 		log.Error("detection stopped", "err", err)
 		os.Exit(1)
 	}

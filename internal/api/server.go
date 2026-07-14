@@ -14,9 +14,27 @@ import (
 
 	"github.com/argus-mss/argus/internal/audit"
 	"github.com/argus-mss/argus/internal/detect"
+	"github.com/argus-mss/argus/internal/events"
+	"github.com/argus-mss/argus/internal/features"
 	"github.com/argus-mss/argus/internal/transport"
 	"github.com/gorilla/websocket"
 )
+
+// MarketTile is the live per-symbol microstructure summary shown on the
+// dashboard. Feature values come straight off the features.* subject the
+// detection engine already publishes for the ML scorer — zero extra
+// computation, one more subscriber.
+type MarketTile struct {
+	Symbol         string  `json:"symbol"`
+	Exchange       string  `json:"exchange,omitempty"`
+	LastPrice      float64 `json:"last_price,omitempty"`
+	LastTradeTsNs  int64   `json:"last_trade_ts_ns,omitempty"`
+	SpreadBps      float64 `json:"spread_bps"`
+	OFI            float64 `json:"ofi"`
+	TradeIntensity float64 `json:"trade_intensity"`
+	CancelRatio    float64 `json:"cancel_ratio"`
+	FeatureTsNs    int64   `json:"feature_ts_ns,omitempty"`
+}
 
 // Config parameterizes the API server.
 type Config struct {
@@ -37,6 +55,7 @@ type Server struct {
 	bySeverity map[string]int
 	total      int
 	lastCheck  *audit.Checkpoint
+	markets    map[string]*MarketTile
 	start      time.Time
 	auditPub   ed25519.PublicKey
 
@@ -53,6 +72,7 @@ func New(cfg Config) *Server {
 		cfg:        cfg,
 		byDetector: make(map[string]int),
 		bySeverity: make(map[string]int),
+		markets:    make(map[string]*MarketTile),
 		start:      time.Now(),
 		hub:        newHub(),
 		upgrader: websocket.Upgrader{
@@ -91,7 +111,49 @@ func (s *Server) AttachBus(bus transport.Bus) error {
 	}); err != nil {
 		return err
 	}
+	// Live microstructure tiles: features come off the same subject the ML
+	// scorer consumes; last prices come from the trade stream.
+	if _, err := bus.Subscribe(transport.FeaturesAll, func(_ string, data []byte) {
+		var v features.Vector
+		if err := json.Unmarshal(data, &v); err != nil || v.Symbol == "" {
+			return
+		}
+		s.mu.Lock()
+		t := s.tileFor(v.Symbol)
+		t.SpreadBps = v.Features[features.SpreadBps]
+		t.OFI = v.Features[features.OFI]
+		t.TradeIntensity = v.Features[features.TradeIntensity]
+		t.CancelRatio = v.Features[features.CancelRatio]
+		t.FeatureTsNs = v.TsNs
+		s.mu.Unlock()
+	}); err != nil {
+		return err
+	}
+	if _, err := bus.Subscribe(transport.MarketDataAll, func(_ string, data []byte) {
+		var env events.Envelope
+		if err := json.Unmarshal(data, &env); err != nil || env.Trade == nil {
+			return // depth frames and malformed data are ignored here
+		}
+		s.mu.Lock()
+		t := s.tileFor(env.Trade.Symbol)
+		t.LastPrice = env.Trade.Price.Float()
+		t.LastTradeTsNs = env.Trade.IngestTsNs
+		t.Exchange = env.Trade.Exchange
+		s.mu.Unlock()
+	}); err != nil {
+		return err
+	}
 	return nil
+}
+
+// tileFor returns (creating if needed) the tile for a symbol. Caller holds mu.
+func (s *Server) tileFor(symbol string) *MarketTile {
+	t, ok := s.markets[symbol]
+	if !ok {
+		t = &MarketTile{Symbol: symbol}
+		s.markets[symbol] = t
+	}
+	return t
 }
 
 func (s *Server) ingestAlert(a detect.Alert, raw []byte) {
@@ -158,24 +220,30 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 
 // StatsResponse is the dashboard summary payload.
 type StatsResponse struct {
-	UptimeSeconds  float64           `json:"uptime_seconds"`
-	TotalAlerts    int               `json:"total_alerts"`
-	ByDetector     map[string]int    `json:"by_detector"`
-	BySeverity     map[string]int    `json:"by_severity"`
-	AlertsPerMin   float64           `json:"alerts_per_min"`
-	WSClients      int               `json:"ws_clients"`
-	LastCheckpoint *audit.Checkpoint `json:"last_checkpoint,omitempty"`
+	UptimeSeconds  float64               `json:"uptime_seconds"`
+	TotalAlerts    int                   `json:"total_alerts"`
+	ByDetector     map[string]int        `json:"by_detector"`
+	BySeverity     map[string]int        `json:"by_severity"`
+	AlertsPerMin   float64               `json:"alerts_per_min"`
+	WSClients      int                   `json:"ws_clients"`
+	Markets        map[string]MarketTile `json:"markets,omitempty"`
+	LastCheckpoint *audit.Checkpoint     `json:"last_checkpoint,omitempty"`
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
 	uptime := time.Since(s.start).Seconds()
+	markets := make(map[string]MarketTile, len(s.markets))
+	for k, t := range s.markets {
+		markets[k] = *t
+	}
 	resp := StatsResponse{
 		UptimeSeconds:  round2(uptime),
 		TotalAlerts:    s.total,
 		ByDetector:     copyMap(s.byDetector),
 		BySeverity:     copyMap(s.bySeverity),
 		WSClients:      s.hub.count(),
+		Markets:        markets,
 		LastCheckpoint: s.lastCheck,
 	}
 	if uptime > 0 {

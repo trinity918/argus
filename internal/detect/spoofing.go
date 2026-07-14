@@ -23,6 +23,9 @@ type spoofingDetector struct {
 
 	pending map[levelKey]*pendingAdd
 	pulls   *Window[pullEvent] // recent pulls, for layering
+
+	lastSpoofFire int64 // alert-emission cooldowns (pull tracking is unthrottled)
+	lastLayerFire int64
 }
 
 type levelKey struct {
@@ -89,8 +92,14 @@ func (d *spoofingDetector) OnDepth(now int64, st *SymbolState, dep events.Depth,
 				d.updateEMA(added)
 			}
 		case dl.Removed():
-			if a, ok := d.evalPull(now, key, dl); ok {
+			a, emitted, pulled := d.evalPull(now, key, dl)
+			if emitted {
 				alerts = append(alerts, a)
+			}
+			// Layering is evaluated on every qualifying pull, even when the
+			// individual spoof alert was throttled — a layering pattern must
+			// not hide behind the spoof cooldown.
+			if pulled {
 				if la, ok := d.evalLayering(now, dl.Side); ok {
 					alerts = append(alerts, la)
 				}
@@ -100,29 +109,40 @@ func (d *spoofingDetector) OnDepth(now int64, st *SymbolState, dep events.Depth,
 	return alerts
 }
 
-// evalPull decides whether a size reduction at a flagged level is a spoof pull.
-func (d *spoofingDetector) evalPull(now int64, key levelKey, dl orderbook.LevelDelta) (Alert, bool) {
+// evalPull decides whether a size reduction at a flagged level is a spoof
+// pull. It returns the alert, whether it should be emitted (cooldown passed),
+// and whether the pull qualified at all (and was therefore recorded for
+// layering detection regardless of emission).
+func (d *spoofingDetector) evalPull(now int64, key levelKey, dl orderbook.LevelDelta) (Alert, bool, bool) {
 	p, ok := d.pending[key]
 	if !ok {
-		return Alert{}, false
+		return Alert{}, false, false
 	}
 	// Removed enough of the flagged size?
 	remaining := dl.NewQty.Float()
 	if remaining > (1-d.cfg.SpoofPullFrac)*p.qty.Float() {
-		return Alert{}, false
+		return Alert{}, false, false
 	}
 	// Cancelled within the window?
 	if now-p.ts > int64(d.cfg.SpoofPullWindow) {
 		delete(d.pending, key)
-		return Alert{}, false
+		return Alert{}, false, false
 	}
 	// Largely unexecuted?
 	if p.traded.Float() > d.cfg.SpoofMaxTradedFrac*p.qty.Float() {
 		delete(d.pending, key)
-		return Alert{}, false
+		return Alert{}, false, false
 	}
 	delete(d.pending, key)
 	d.pulls.Add(now, pullEvent{side: key.side, price: key.price})
+
+	// Alert-emission throttle: on a volatile live tape, qualifying pulls can
+	// occur many times per second; the audit trail records the pattern, not
+	// every instance of it.
+	if now-d.lastSpoofFire < int64(d.cfg.SpoofCooldown) {
+		return Alert{}, false, true
+	}
+	d.lastSpoofFire = now
 
 	lifeMs := float64(now-p.ts) / 1e6
 	score := clamp01(p.qty.Float() / (d.cfg.SpoofSizeMultiple * d.avgSize) / 3)
@@ -142,7 +162,7 @@ func (d *spoofingDetector) evalPull(now int64, key levelKey, dl orderbook.LevelD
 			"lifetime_ms":   round4(lifeMs),
 			"traded_qty":    p.traded.String(),
 		},
-	}, true
+	}, true, true
 }
 
 // evalLayering fires when enough distinct same-side levels were pulled recently.
@@ -157,6 +177,10 @@ func (d *spoofingDetector) evalLayering(now int64, side events.Side) (Alert, boo
 	if len(distinct) < d.cfg.LayeringLevels {
 		return Alert{}, false
 	}
+	if now-d.lastLayerFire < int64(d.cfg.LayeringCooldown) {
+		return Alert{}, false
+	}
+	d.lastLayerFire = now
 	return Alert{
 		TsNs:        now,
 		Detector:    DetectorLayering,
